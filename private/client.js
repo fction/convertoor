@@ -1,5 +1,5 @@
-import {FFmpeg} from '/vendor/index.js';
-import {mountInput, formats, signature, readReport, identify, choices, encodeArgs} from '/api/gateway?view=media';
+import {formats, signature, readReport, identify, choices, encodeFile} from '/api/gateway?view=media';
+import {openMedia, releaseRuntime} from '/api/gateway?view=runtime';
 const el = id => document.getElementById(id);
 const api = '/api/gateway?view=';
 const labels = {image:'Image', audio:'Audio', video:'Video'};
@@ -11,13 +11,17 @@ function discardOutput() {
   if (resultURL) URL.revokeObjectURL(resultURL);
   resultURL = undefined;
   el('download').removeAttribute('href');
+  el('download').removeAttribute('download');
+  el('result-info').textContent = '';
   el('result').hidden = true;
 }
 function reset(message = '') {
-  if (job) { clearTimeout(job.timer); job.engine?.terminate(); }
+  if (job) { clearTimeout(job.timer); job.controller.abort(); }
   job = null;
   discardOutput();
   el('file').value = '';
+  el('filename').textContent = '';
+  el('metadata').textContent = '';
   el('file-info').hidden = true;
   el('drop').hidden = false;
   el('cancel').hidden = true;
@@ -25,6 +29,9 @@ function reset(message = '') {
   el('settings').disabled = true;
   el('mode').replaceChildren(new Option('Choose a file'));
   el('format').replaceChildren(new Option('—'));
+  el('run').firstChild.textContent = 'Process file ';
+  el('quality').value = 'balanced';
+  el('quality').disabled = false;
   el('hint').textContent = '';
   note(message);
 }
@@ -41,10 +48,6 @@ function options() {
   el('run').firstChild.textContent = actions[mode] + ' ';
   profiles();
 }
-function armTimeout(task, ms) {
-  clearTimeout(task.timer);
-  task.timer = setTimeout(() => { if (job === task) reset('Processing stopped responding. Try a smaller file or a lower quality preset.'); }, ms);
-}
 function busy(task, text, ms) {
   el('settings').disabled = true;
   el('clear').hidden = true;
@@ -52,7 +55,14 @@ function busy(task, text, ms) {
   el('progress').hidden = false;
   el('progress').removeAttribute('value');
   note(text);
-  armTimeout(task, ms);
+  task.lastAdvance = performance.now();
+  function checkProgress() {
+    if (job !== task) return;
+    const remaining = ms - (performance.now() - task.lastAdvance);
+    if (remaining > 0) task.timer = setTimeout(checkProgress, remaining);
+    else reset('Processing stopped responding. Try a smaller file or a lower quality preset.');
+  }
+  task.timer = setTimeout(checkProgress, ms);
 }
 function ready(task) {
   clearTimeout(task.timer);
@@ -65,7 +75,7 @@ async function selectFile(file) {
   reset();
   if (!file) return;
   if (!file.size) return note('This file is empty. Choose another file.');
-  const task = { file };
+  const task = { file, controller:new AbortController() };
   job = task;
   el('drop').hidden = true;
   el('file-info').hidden = false;
@@ -75,11 +85,9 @@ async function selectFile(file) {
   try {
     const header = signature(new Uint8Array(await file.slice(0,32).arrayBuffer()));
     if (job !== task) return;
-    const engine = task.engine = new FFmpeg();
     note('Loading the media engine in your browser…');
-    await engine.load({coreURL:location.origin + '/vendor/ffmpeg-core.js', wasmURL:location.origin + '/vendor/ffmpeg-core.wasm'});
+    const engine = task.engine = await openMedia(file, header, task.controller.signal);
     if (job !== task) return;
-    await mountInput(engine, file);
     const info = task.info = identify(header, await readReport(engine));
     if (job !== task) return;
     const detail = [labels[info.kind],info.label,size(file.size)];
@@ -100,26 +108,21 @@ async function convert() {
   if (!task?.info || el('settings').disabled) return;
   discardOutput();
   const mode = el('mode').value, target = el('format').value;
-  const stallTimeout = 5 * 60 * 1000;
-  busy(task, 'Processing the file on your device…', stallTimeout);
+  busy(task, 'Processing the file on your device…', 5 * 60 * 1000);
   let lastTime = -1, lastProgress = -1;
   const onProgress = ({progress, time}) => {
     if (job !== task) return;
     if (time > lastTime || progress > lastProgress) {
       lastTime = Math.max(lastTime, time);
       lastProgress = Math.max(lastProgress, progress);
-      armTimeout(task, stallTimeout);
+      task.lastAdvance = performance.now();
     }
     if (progress > 0 && progress <= 1) el('progress').value = Math.min(99,progress*100);
   };
   task.engine.on('progress',onProgress);
   try {
-    const result = await task.engine.exec(encodeArgs(task.info,mode,target,el('quality').value));
-    if (result !== 0) throw new Error('Could not encode the file. Try a different output format or a smaller file.');
-    const data = await task.engine.readFile('output.'+target);
-    if (!data.length) throw new Error('The media engine returned an empty file.');
+    const blob = await encodeFile(task.engine,task.info,mode,target,el('quality').value,task.controller.signal);
     if (job !== task) return;
-    const blob = new Blob([data],{type:formats[target][1]});
     resultURL = URL.createObjectURL(blob);
     el('download').href = resultURL;
     el('download').download = (task.file.name.replace(/\.[^.]+$/,'') || 'result') + '-export.' + target;
@@ -130,27 +133,28 @@ async function convert() {
     if (job === task) note(error instanceof Error ? error.message : 'Processing stopped. Try a different file.');
   } finally {
     task.engine.off('progress',onProgress);
-    if (job === task) {
-      await task.engine.deleteFile('output.'+target).catch(() => {});
-      if (job === task) ready(task);
-    }
+    if (job === task) ready(task);
   }
 }
-function leave() { reset(); clearTimeout(expiry); location.replace('/'); }
+function leave() { reset(); releaseRuntime(); clearTimeout(expiry); location.replace('/'); }
 async function checkSession() {
+  const started = performance.now();
   try {
     const response = await fetch(api+'session',{cache:'no-store'});
     if (!response.ok) return leave();
     const session = await response.json();
     el('user').textContent = session.login;
     clearTimeout(expiry);
-    expiry = setTimeout(leave,Math.max(0,session.expires-Date.now()));
+    expiry = setTimeout(leave, Math.max(0, session.remainingMs - (performance.now() - started)));
   } catch { leave(); }
 }
+const sessionEvents = typeof BroadcastChannel === 'function' ? new BroadcastChannel('convertoor-session') : null;
+if (sessionEvents) sessionEvents.onmessage = ({data}) => { if (data === 'logout') leave(); };
 el('logout').onclick = async () => {
   try {
     const r = await fetch(api+'logout',{method:'POST',headers:{'Content-Type':'application/json'},body:'{}'});
     if (!r.ok) throw new Error();
+    sessionEvents?.postMessage('logout');
     leave();
   } catch { note('Could not sign out. Check your connection and try again.'); }
 };
@@ -169,4 +173,10 @@ el('format').onchange = profiles;
 el('quality').onchange = discardOutput;
 el('run').onclick = convert;
 window.addEventListener('pageshow',checkSession);
-window.addEventListener('pagehide',() => reset());
+window.addEventListener('pagehide',() => { reset(); releaseRuntime(); clearTimeout(expiry); });
+// A file dropped outside the picker must not navigate away from a running job.
+for (const eventName of ['dragover','drop']) {
+  window.addEventListener(eventName,event => {
+    if (event.dataTransfer?.types.includes('Files')) event.preventDefault();
+  });
+}

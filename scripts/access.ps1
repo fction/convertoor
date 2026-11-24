@@ -10,8 +10,17 @@ if ($Action -eq 'Initialize') {
     [IO.Directory]::CreateDirectory($vaultDir) | Out-Null
     $secret = ConvertTo-SecureString $record -AsPlainText -Force
     $encrypted = ConvertFrom-SecureString -SecureString $secret
-    $stream = [IO.File]::Open($vaultFile, [IO.FileMode]::CreateNew, [IO.FileAccess]::Write, [IO.FileShare]::None)
-    try { $bytes = [Text.Encoding]::UTF8.GetBytes($encrypted); $stream.Write($bytes,0,$bytes.Length) } finally { $stream.Dispose() }
+    $pendingFile = Join-Path $vaultDir ([IO.Path]::GetRandomFileName())
+    try {
+        [IO.File]::WriteAllText($pendingFile, $encrypted)
+        # The first completed initialization publishes its account atomically.
+        try { [IO.File]::Move($pendingFile, $vaultFile) }
+        catch [IO.IOException] {
+            if (![IO.File]::Exists($vaultFile)) { throw }
+            Write-Output 'The existing Convertoor account was preserved.'
+            exit 0
+        }
+    } finally { [IO.File]::Delete($pendingFile) }
     Write-Output 'Account fction is stored under the current Windows user with DPAPI protection.'
     exit 0
 }
@@ -21,9 +30,13 @@ if ($Action -eq 'CopyPassword') {
     Set-Clipboard -Value $record.password
     Write-Output 'Password copied. Login: fction.'
 } elseif ($Action -eq 'Start') {
-    $env:CONVERTOOR_ACCOUNT = $record.account | ConvertTo-Json -Compress
-    & node server.mjs
-    exit $LASTEXITCODE
+    $previousAccount = $env:CONVERTOOR_ACCOUNT
+    try {
+        $env:CONVERTOOR_ACCOUNT = $record.account | ConvertTo-Json -Compress
+        & node server.mjs
+        $serverExitCode = $LASTEXITCODE
+    } finally { $env:CONVERTOOR_ACCOUNT = $previousAccount }
+    exit $serverExitCode
 } elseif ($Action -eq 'Publish') {
     ($record.account | ConvertTo-Json -Compress) | npm.cmd exec --yes --package=vercel -- vercel env add CONVERTOOR_ACCOUNT production --sensitive --yes
     exit $LASTEXITCODE

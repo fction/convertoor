@@ -31,3 +31,29 @@ test('silent video offers only video formats', () => {
   assert.deepEqual(choices(info,'extract'),[]);
   assert.deepEqual(choices(info,'compress'),['mp4','webm']);
 });
+
+test('the longest known media duration is used when metadata is incomplete', () => {
+  const audio = {codec_type:'audio',index:0,duration:'25.25'};
+  assert.equal(identify({label:'WAV'},{streams:[audio],format:{duration:'N/A'}}).duration,25.25);
+  assert.throws(() => identify({label:'WAV'},{streams:[{...audio,duration:'1801'}],format:{duration:'3'}}), /30 minutes/);
+});
+
+test('the classifier recognizes RF64, older QuickTime headers, and ADTS AAC', () => {
+  assert.equal(signature(Buffer.from('RF64xxxxWAVE')).label,'WAV');
+  assert.equal(signature(Buffer.from([0,0,0,8,119,105,100,101])).label,'MP4 / MOV');
+  assert.equal(signature(Buffer.from([255,241,80,128])).label,'AAC');
+});
+
+test('only animated extended WebP uses the first-frame decoder', () => {
+  const header = Buffer.alloc(32);
+  header.write('RIFF');
+  header.write('WEBPVP8X',8);
+  header.writeUInt32LE(10,16);
+  header.writeUIntLE(47,24,3);
+  header.writeUIntLE(31,27,3);
+  assert.equal(signature(header).animatedWebP,undefined);
+  header[20] = 2;
+  assert.equal(signature(header).animatedWebP,true);
+  header.writeUIntLE(8192,24,3);
+  assert.throws(() => signature(header), /8,192/);
+});

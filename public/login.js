@@ -9,7 +9,11 @@ form.addEventListener('submit', async event => {
   message.textContent = 'Signing in…';
   try {
     const r = await fetch(endpoint + 'login', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(Object.fromEntries(new FormData(form)))});
-    if (r.status === 429) throw new Error('Too many sign-in attempts. Try again in 10 minutes.');
+    if (r.status === 429) {
+      const minutes = Math.ceil(Number(r.headers.get('Retry-After')) / 60);
+      const wait = minutes > 0 && Number.isFinite(minutes) ? 'in ' + minutes + (minutes === 1 ? ' minute.' : ' minutes.') : 'later.';
+      throw new Error('Too many sign-in attempts. Try again ' + wait);
+    }
     if (!r.ok) {
       const details = await r.json().catch(() => ({}));
       throw new Error(details.error || 'Could not sign in. Please try again.');

@@ -1,18 +1,17 @@
 import { readFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { configuredAccount, lifetime, ticket, validTicket, verifyPassword } from '../lib/account.mjs';
+import { createLoginThrottle } from '../lib/login-throttle.mjs';
 
-const documents = new Map([['studio', ['studio.html', 'text/html']], ['client', ['client.js', 'text/javascript']], ['media', ['media.js', 'text/javascript']]]);
-const attempts = new Map();
+const documents = new Map([
+  ['studio', ['studio.html', 'text/html']],
+  ['client', ['client.js', 'text/javascript']],
+  ['media', ['media.js', 'text/javascript']],
+  ['runtime', ['runtime.js', 'text/javascript']],
+  ['webp-frame', ['webp-frame.js', 'text/javascript']]
+]);
+const throttle = createLoginThrottle();
 let deriving = 0;
-function limited(address, now) {
-  for (const [key, record] of attempts) if (record.until <= now) attempts.delete(key);
-  const record = attempts.get(address) || { count: 0, until: now + 600000 };
-  if (record.count >= 6 || attempts.size >= 4096 || deriving >= 2) return true;
-  record.count++;
-  attempts.set(address, record);
-  return false;
-}
 const json = (res, status, data) => {
   res.writeHead(status, { 'Content-Type': 'application/json; charset=utf-8' });
   res.end(JSON.stringify(data));
@@ -57,16 +56,21 @@ export default async function gateway(req, res) {
     let fields;
     try { fields = await body(req); } catch { return json(res, 400, {}); }
     if (typeof fields?.login !== 'string' || typeof fields?.password !== 'string' || fields.login.length > 128 || fields.password.length > 256) return json(res, 400, {});
-    const address = (process.env.VERCEL ? req.headers['x-vercel-forwarded-for'] || req.headers['x-forwarded-for'] : req.socket.remoteAddress) || 'unknown';
-    if (limited(address, now)) {
-      res.setHeader('Retry-After', '600');
-      return json(res, 429, { error: 'Too many sign-in attempts. Try again in 10 minutes.' });
+    if (deriving >= 2) {
+      res.setHeader('Retry-After', '2');
+      return json(res, 503, { error: 'Sign-in is busy. Try again in a moment.' });
+    }
+    const address = (process.env.VERCEL ? req.headers['x-vercel-forwarded-for'] : req.socket.remoteAddress) || 'unknown';
+    const wait = throttle.reserve(address);
+    if (wait) {
+      res.setHeader('Retry-After', String(wait));
+      return json(res, 429, { error: 'Too many sign-in attempts. Try again later.' });
     }
     deriving++;
     let accepted;
     try { accepted = await verifyPassword(account, fields.login, fields.password); } finally { deriving--; }
     if (!accepted) return json(res, 401, { error: 'Check your username and password.' });
-    attempts.delete(address);
+    throttle.clear(address);
     res.setHeader('Set-Cookie', cookieName + '=' + ticket(account, now) + '; Max-Age=' + lifetime + attributes);
     return json(res, 200, { ok: true });
   }
@@ -75,7 +79,10 @@ export default async function gateway(req, res) {
     if (route === 'studio') { res.writeHead(303, { Location: '/' }); return res.end(); }
     return json(res, 401, {});
   }
-  if (route === 'session') return json(res, 200, { login: account.login, expires: Number(session.split('.')[0]) });
+  if (route === 'session') {
+    const expires = Number(session.split('.')[0]);
+    return json(res, 200, { login: account.login, expires, remainingMs:expires - now });
+  }
   const doc = documents.get(route);
   if (!doc) return json(res, 404, {});
   const content = await readFile(join(process.cwd(), 'private', doc[0]));

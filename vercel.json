@@ -5,16 +5,20 @@
   "buildCommand": "npm run build",
   "outputDirectory": "dist",
   "functions": { "api/gateway.mjs": { "includeFiles": "private/**" } },
+  "redirects": [{ "source": "/vendor/ffmpeg-core.:ext", "destination": "/vendor/core/0.12.10/ffmpeg-core.:ext", "permanent": false }],
   "rewrites": [{ "source": "/studio", "destination": "/api/gateway?view=studio" }],
   "headers": [{
     "source": "/(.*)",
     "headers": [
-      { "key": "Content-Security-Policy", "value": "default-src 'none'; script-src 'self' 'wasm-unsafe-eval'; style-src 'self'; img-src 'self' blob:; worker-src 'self'; connect-src 'self'; font-src 'self'; media-src blob:; object-src 'none'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'" },
+      { "key": "Content-Security-Policy", "value": "default-src 'none'; script-src 'self' 'wasm-unsafe-eval'; style-src 'self'; img-src 'self' blob:; worker-src 'self'; connect-src 'self' blob:; font-src 'self'; media-src blob:; object-src 'none'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'" },
       { "key": "Referrer-Policy", "value": "no-referrer" },
       { "key": "X-Content-Type-Options", "value": "nosniff" },
       { "key": "X-Frame-Options", "value": "DENY" },
       { "key": "Strict-Transport-Security", "value": "max-age=31536000" },
       { "key": "Permissions-Policy", "value": "camera=(), microphone=(), geolocation=()" }
     ]
+  }, {
+    "source": "/vendor/core/:version/:asset",
+    "headers": [{ "key": "Cache-Control", "value": "public, max-age=31536000, immutable" }]
   }]
 }
