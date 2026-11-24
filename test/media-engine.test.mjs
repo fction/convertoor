@@ -8,10 +8,11 @@ test('the shipped WASM reads a real probe report and encodes stereo Vorbis', asy
   globalThis.self = {location:{href:'http://localhost/'}};
   const wasmBinary = await readFile(new URL(import.meta.resolve('@ffmpeg/core/wasm')));
   const core = await createCore({wasmBinary});
-  const generated = core.exec('-f','lavfi','-i','sine=frequency=500:sample_rate=48000','-t','0.1','-ac','2','-f','wav','input');
+  core.FS.mkdir('/source');
+  const generated = core.exec('-f','lavfi','-i','sine=frequency=500:sample_rate=48000','-t','0.1','-ac','2','-f','wav','/source/input');
   assert.equal(generated,0);
   core.reset();
-  const header = signature(core.FS.readFile('input'));
+  const header = signature(core.FS.readFile('/source/input'));
   const report = await readReport({
     ffprobe(args,timeout) { core.setTimeout(timeout); const code=core.ffprobe(...args); core.reset(); return code; },
     readFile(file,encoding) { return core.FS.readFile(file,{encoding}); }

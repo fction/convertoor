@@ -1,4 +1,13 @@
-export const limit = 100 * 1024 * 1024;
+const sourceDir = '/source';
+const sourceName = 'input';
+const inputPath = sourceDir + '/' + sourceName;
+
+export async function mountInput(engine, file) {
+  await engine.createDir(sourceDir);
+  // WORKERFS reads slices of the original File on demand inside the worker.
+  const mounted = await engine.mount('WORKERFS', {blobs:[{name:sourceName, data:file}]}, sourceDir);
+  if (!mounted) throw new Error('The media engine could not open this file for reading.');
+}
 export const formats = {
   jpg: ['JPEG', 'image/jpeg'], png: ['PNG', 'image/png'], webp: ['WebP', 'image/webp'],
   mp3: ['MP3', 'audio/mpeg'], wav: ['WAV', 'audio/wav'], flac: ['FLAC', 'audio/flac'], ogg: ['Ogg Vorbis', 'audio/ogg'],
@@ -32,7 +41,7 @@ export function signature(bytes) {
 }
 export const inputArgs = ['-protocol_whitelist', 'file', '-format_whitelist', 'png_pipe,apng,jpeg_pipe,gif,webp_pipe,bmp_pipe,tiff_pipe,mp3,aac,wav,flac,ogg,matroska,webm,mov,avi'];
 export async function readReport(engine) {
-  const code = await engine.ffprobe(['-v','error',...inputArgs,'-show_streams','-show_format','-of','json','-o','probe.json','input'], 25000);
+  const code = await engine.ffprobe(['-v','error',...inputArgs,'-show_streams','-show_format','-of','json','-o','probe.json',inputPath], 25000);
   // This core can leave its return slot at -1 after writing a complete ffprobe report.
   try {
     if (code !== 0 && code !== -1) throw new Error();
@@ -60,7 +69,7 @@ export function encodeArgs(info, mode, target, quality) {
   if (!choices(info, mode).includes(target) || !['small','balanced','high'].includes(quality)) throw new Error('Choose a supported format and quality preset.');
   const index = ['small','balanced','high'].indexOf(quality);
   const channels = String(Math.min(info.audio?.channels || 2, 2));
-  const args = [...inputArgs, '-threads','1','-i','input','-map_metadata','-1','-map_chapters','-1','-sn','-dn'];
+  const args = [...inputArgs, '-threads','1','-i',inputPath,'-map_metadata','-1','-map_chapters','-1','-sn','-dn'];
   if (info.kind === 'image') {
     args.push('-map','0:' + info.video.index,'-frames:v','1');
     if (target === 'webp') args.push('-c:v','libwebp','-quality', ['48','76','92'][index]);

@@ -1,5 +1,5 @@
 import {FFmpeg} from '/vendor/index.js';
-import {limit, formats, signature, readReport, identify, choices, encodeArgs} from '/api/gateway?view=media';
+import {mountInput, formats, signature, readReport, identify, choices, encodeArgs} from '/api/gateway?view=media';
 const el = id => document.getElementById(id);
 const api = '/api/gateway?view=';
 const labels = {image:'Image', audio:'Audio', video:'Video'};
@@ -41,6 +41,10 @@ function options() {
   el('run').firstChild.textContent = actions[mode] + ' ';
   profiles();
 }
+function armTimeout(task, ms) {
+  clearTimeout(task.timer);
+  task.timer = setTimeout(() => { if (job === task) reset('Processing stopped responding. Try a smaller file or a lower quality preset.'); }, ms);
+}
 function busy(task, text, ms) {
   el('settings').disabled = true;
   el('clear').hidden = true;
@@ -48,7 +52,7 @@ function busy(task, text, ms) {
   el('progress').hidden = false;
   el('progress').removeAttribute('value');
   note(text);
-  task.timer = setTimeout(() => { if (job === task) reset('Processing timed out. Try a smaller file.'); }, ms);
+  armTimeout(task, ms);
 }
 function ready(task) {
   clearTimeout(task.timer);
@@ -60,7 +64,7 @@ function ready(task) {
 async function selectFile(file) {
   reset();
   if (!file) return;
-  if (!file.size || file.size > limit) return note('Choose a non-empty file of 100 MiB or less.');
+  if (!file.size) return note('This file is empty. Choose another file.');
   const task = { file };
   job = task;
   el('drop').hidden = true;
@@ -75,7 +79,7 @@ async function selectFile(file) {
     note('Loading the media engine in your browser…');
     await engine.load({coreURL:location.origin + '/vendor/ffmpeg-core.js', wasmURL:location.origin + '/vendor/ffmpeg-core.wasm'});
     if (job !== task) return;
-    await engine.writeFile('input',new Uint8Array(await file.arrayBuffer()));
+    await mountInput(engine, file);
     const info = task.info = identify(header, await readReport(engine));
     if (job !== task) return;
     const detail = [labels[info.kind],info.label,size(file.size)];
@@ -96,13 +100,21 @@ async function convert() {
   if (!task?.info || el('settings').disabled) return;
   discardOutput();
   const mode = el('mode').value, target = el('format').value;
-  busy(task, 'Processing the file on your device…', 300000);
-  const onProgress = ({progress}) => {
-    if (job === task && progress > 0 && progress <= 1) el('progress').value = Math.min(99,progress*100);
+  const stallTimeout = 5 * 60 * 1000;
+  busy(task, 'Processing the file on your device…', stallTimeout);
+  let lastTime = -1, lastProgress = -1;
+  const onProgress = ({progress, time}) => {
+    if (job !== task) return;
+    if (time > lastTime || progress > lastProgress) {
+      lastTime = Math.max(lastTime, time);
+      lastProgress = Math.max(lastProgress, progress);
+      armTimeout(task, stallTimeout);
+    }
+    if (progress > 0 && progress <= 1) el('progress').value = Math.min(99,progress*100);
   };
   task.engine.on('progress',onProgress);
   try {
-    const result = await task.engine.exec(encodeArgs(task.info,mode,target,el('quality').value), 290000);
+    const result = await task.engine.exec(encodeArgs(task.info,mode,target,el('quality').value));
     if (result !== 0) throw new Error('Could not encode the file. Try a different output format or a smaller file.');
     const data = await task.engine.readFile('output.'+target);
     if (!data.length) throw new Error('The media engine returned an empty file.');
