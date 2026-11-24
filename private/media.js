@@ -22,13 +22,13 @@ export function signature(bytes) {
   if (first === 'OggS') return { label:'Ogg' };
   if (first === 'fLaC') return { label:'FLAC' };
   if (starts(26,69,223,163)) return { label:'Matroska / WebM' };
-  if (starts(73,68,51) || (bytes[0] === 255 && (bytes[1] & 224) === 224)) return { label:'MPEG-аудио' };
+  if (starts(73,68,51) || (bytes[0] === 255 && (bytes[1] & 224) === 224)) return { label:'MPEG audio' };
   if (ascii(bytes, 4, 4) === 'ftyp') {
-    if (/^(avif|avis|heic|heix|mif1|msf1|hevc|hevx)$/.test(ascii(bytes, 8, 4))) throw new Error('Это HEIF или AVIF. Для этой версии выберите PNG, JPEG или WebP.');
+    if (/^(avif|avis|heic|heix|mif1|msf1|hevc|hevx)$/.test(ascii(bytes, 8, 4))) throw new Error('HEIF and AVIF are not supported yet. Choose a PNG, JPEG, or WebP image.');
     return { label:'MP4 / MOV' };
   }
-  if (first === '%PDF' || starts(80,75,3,4)) throw new Error('Это документ или архив. Выберите изображение, аудио или видео.');
-  throw new Error('Тип файла не поддерживается. Список доступных форматов приведён ниже.');
+  if (first === '%PDF' || starts(80,75,3,4)) throw new Error('This file is a document or archive. Choose an image, audio file, or video.');
+  throw new Error('Unsupported file type. See the list of supported formats below.');
 }
 export const inputArgs = ['-protocol_whitelist', 'file', '-format_whitelist', 'png_pipe,apng,jpeg_pipe,gif,webp_pipe,bmp_pipe,tiff_pipe,mp3,aac,wav,flac,ogg,matroska,webm,mov,avi'];
 export async function readReport(engine) {
@@ -37,16 +37,16 @@ export async function readReport(engine) {
   try {
     if (code !== 0 && code !== -1) throw new Error();
     return JSON.parse(await engine.readFile('probe.json','utf8'));
-  } catch { throw new Error('Не удалось прочитать контейнер. Проверьте, что файл открывается и его кодек поддерживается.'); }
+  } catch { throw new Error('Could not read this media file. Check that it opens and uses a supported codec.'); }
 }
 export function identify(header, probe) {
   const streams = probe.streams || [];
   const video = streams.find(s => s.codec_type === 'video' && !s.disposition?.attached_pic);
   const audio = streams.find(s => s.codec_type === 'audio');
-  if ((!video && !audio) || (header.image && !video)) throw new Error('В файле не удалось прочитать медиадорожку.');
-  if (video && (!video.width || !video.height || video.width * video.height > 40000000 || Math.max(video.width,video.height) > 8192)) throw new Error('Размер кадра выходит за пределы 40 Мп или 8192 пикселей по стороне.');
+  if ((!video && !audio) || (header.image && !video)) throw new Error('No readable media track was found in this file.');
+  if (video && (!video.width || !video.height || video.width * video.height > 40000000 || Math.max(video.width,video.height) > 8192)) throw new Error('Frames must be at most 40 megapixels and no more than 8,192 pixels on either side.');
   const duration = Number(probe.format?.duration || video?.duration || audio?.duration || 0);
-  if (duration > 1800) throw new Error('Файл длиннее 30 минут. Выберите более короткую запись.');
+  if (duration > 1800) throw new Error('This file is longer than 30 minutes. Choose a shorter recording.');
   const kind = header.image ? 'image' : video ? 'video' : 'audio';
   const stillOnly = header.image && ['GIF','WebP','PNG','TIFF'].includes(header.label);
   return { kind, label:header.label, audio, video, duration, stillOnly };
@@ -57,7 +57,7 @@ export function choices(info, mode) {
   return { image:['png','jpg','webp'], audio:['mp3','wav','flac','ogg'], video:['mp4','webm'] }[info.kind];
 }
 export function encodeArgs(info, mode, target, quality) {
-  if (!choices(info, mode).includes(target) || !['small','balanced','high'].includes(quality)) throw new Error('Выберите доступный формат и качество.');
+  if (!choices(info, mode).includes(target) || !['small','balanced','high'].includes(quality)) throw new Error('Choose a supported format and quality preset.');
   const index = ['small','balanced','high'].indexOf(quality);
   const channels = String(Math.min(info.audio?.channels || 2, 2));
   const args = [...inputArgs, '-threads','1','-i','input','-map_metadata','-1','-map_chapters','-1','-sn','-dn'];

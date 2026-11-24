@@ -6,15 +6,15 @@ form.addEventListener('submit', async event => {
   event.preventDefault();
   const button = form.querySelector('button');
   button.disabled = true;
-  message.textContent = 'Проверяем данные…';
+  message.textContent = 'Signing in…';
   try {
     const r = await fetch(endpoint + 'login', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(Object.fromEntries(new FormData(form)))});
-    if (r.status === 429) throw new Error('Слишком много попыток входа. Повторите через 10 минут.');
+    if (r.status === 429) throw new Error('Too many sign-in attempts. Try again in 10 minutes.');
     if (!r.ok) {
       const details = await r.json().catch(() => ({}));
-      throw new Error(details.error || 'Не удалось войти. Попробуйте ещё раз.');
+      throw new Error(details.error || 'Could not sign in. Please try again.');
     }
     form.reset();
     location.replace('/studio');
-  } catch (error) { message.textContent = error.message === 'Failed to fetch' ? 'Нет связи с сервером.' : error.message; button.disabled = false; }
+  } catch (error) { message.textContent = error.message === 'Failed to fetch' ? 'Could not reach the server. Check your connection and try again.' : error.message; button.disabled = false; }
 });

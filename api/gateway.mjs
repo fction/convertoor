@@ -37,7 +37,7 @@ export default async function gateway(req, res) {
   res.setHeader('Vercel-CDN-Cache-Control', 'no-store');
   res.setHeader('X-Content-Type-Options', 'nosniff');
   const account = configuredAccount(process.env.CONVERTOOR_ACCOUNT);
-  if (!account) return json(res, 503, { error: 'Владелец ещё не настроил доступ.' });
+  if (!account) return json(res, 503, { error: 'The owner has not set up access yet.' });
   const secure = Boolean(process.env.VERCEL) || process.env.NODE_ENV === 'production';
   const host = req.headers.host;
   const expectedOrigin = (secure ? 'https://' : 'http://') + host;
@@ -60,12 +60,12 @@ export default async function gateway(req, res) {
     const address = (process.env.VERCEL ? req.headers['x-vercel-forwarded-for'] || req.headers['x-forwarded-for'] : req.socket.remoteAddress) || 'unknown';
     if (limited(address, now)) {
       res.setHeader('Retry-After', '600');
-      return json(res, 429, { error: 'Слишком много попыток. Повторите через 10 минут.' });
+      return json(res, 429, { error: 'Too many sign-in attempts. Try again in 10 minutes.' });
     }
     deriving++;
     let accepted;
     try { accepted = await verifyPassword(account, fields.login, fields.password); } finally { deriving--; }
-    if (!accepted) return json(res, 401, { error: 'Проверьте логин и пароль.' });
+    if (!accepted) return json(res, 401, { error: 'Check your username and password.' });
     attempts.delete(address);
     res.setHeader('Set-Cookie', cookieName + '=' + ticket(account, now) + '; Max-Age=' + lifetime + attributes);
     return json(res, 200, { ok: true });
