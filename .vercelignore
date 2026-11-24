@@ -1,0 +1,11 @@
+.git/
+.github/
+.env*
+.local/
+node_modules/
+dist/
+docs/
+pages/
+test/
+scripts/access.ps1
+scripts/generate-access.mjs
