@@ -2,15 +2,20 @@ import { readFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { configuredAccount, lifetime, ticket, validTicket, verifyPassword } from '../lib/account.mjs';
 import { createLoginThrottle } from '../lib/login-throttle.mjs';
+import { createBlobSessions, createLocalSessions } from '../lib/sessions.mjs';
 
 const documents = new Map([
   ['studio', ['studio.html', 'text/html']],
   ['client', ['client.js', 'text/javascript']],
   ['media', ['media.js', 'text/javascript']],
   ['runtime', ['runtime.js', 'text/javascript']],
-  ['webp-frame', ['webp-frame.js', 'text/javascript']]
+  ['webp-frame', ['webp-frame.js', 'text/javascript']],
+  ['disk-output', ['disk-output.js', 'text/javascript']],
+  ['engine-worker', ['engine-worker.js', 'text/javascript']],
+  ['download-worker', ['download-worker.js', 'text/javascript']]
 ]);
 const throttle = createLoginThrottle();
+const sessions = process.env.VERCEL || process.env.NODE_ENV === 'production' ? createBlobSessions() : createLocalSessions();
 let deriving = 0;
 const json = (res, status, data) => {
   res.writeHead(status, { 'Content-Type': 'application/json; charset=utf-8' });
@@ -31,7 +36,12 @@ async function body(req) {
   }
   return JSON.parse(Buffer.concat(chunks).toString());
 }
-export default async function gateway(req, res) {
+function unavailable(res) {
+  res.setHeader('Retry-After', '2');
+  return json(res, 503, {error:'Session storage is temporarily unavailable. Please try again.'});
+}
+export default function gateway(req, res) { return handleGateway(req, res, sessions); }
+export async function handleGateway(req, res, store) {
   res.setHeader('Cache-Control', 'private, no-store');
   res.setHeader('Vercel-CDN-Cache-Control', 'no-store');
   res.setHeader('X-Content-Type-Options', 'nosniff');
@@ -50,6 +60,9 @@ export default async function gateway(req, res) {
     if (req.method !== 'POST') return json(res, 405, {});
     if (req.headers.origin !== expectedOrigin || req.headers['content-type']?.split(';')[0] !== 'application/json') return json(res, 403, {});
     if (route === 'logout') {
+      if (validTicket(session, account, now)) {
+        try { await store.revoke(session); } catch { return unavailable(res); }
+      }
       res.setHeader('Set-Cookie', cookieName + '=; Max-Age=0' + attributes);
       return json(res, 200, { ok: true });
     }
@@ -71,17 +84,24 @@ export default async function gateway(req, res) {
     try { accepted = await verifyPassword(account, fields.login, fields.password); } finally { deriving--; }
     if (!accepted) return json(res, 401, { error: 'Check your username and password.' });
     throttle.clear(address);
-    res.setHeader('Set-Cookie', cookieName + '=' + ticket(account, now) + '; Max-Age=' + lifetime + attributes);
+    const issued = ticket(account, Date.now());
+    try { await store.activate(issued); } catch { return unavailable(res); }
+    res.setHeader('Set-Cookie', cookieName + '=' + issued + '; Max-Age=' + lifetime + attributes);
     return json(res, 200, { ok: true });
   }
   if (req.method !== 'GET') return json(res, 405, {});
-  if (!validTicket(session, account, now)) {
+  let active = false;
+  if (validTicket(session, account, now)) {
+    try { active = await store.active(session); } catch { return unavailable(res); }
+  }
+  const expires = Number(session.split('.')[0]);
+  const remainingMs = expires - Date.now();
+  if (!active || remainingMs <= 0) {
     if (route === 'studio') { res.writeHead(303, { Location: '/' }); return res.end(); }
     return json(res, 401, {});
   }
   if (route === 'session') {
-    const expires = Number(session.split('.')[0]);
-    return json(res, 200, { login: account.login, expires, remainingMs:expires - now });
+    return json(res, 200, { login: account.login, expires, remainingMs });
   }
   const doc = documents.get(route);
   if (!doc) return json(res, 404, {});

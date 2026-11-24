@@ -1,5 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import {createHmac} from 'node:crypto';
 import { newAccount, configuredAccount, ticket, validTicket, verifyPassword } from '../lib/account.mjs';
 import { signature, identify, choices, encodeArgs } from '../private/media.js';
 test('signed sessions expire, reject edits and rotate with account settings', async () => {
@@ -10,6 +11,10 @@ test('signed sessions expire, reject edits and rotate with account settings', as
   assert.equal(await verifyPassword(acc,'other','a test-only string'),false);
   const now = Date.now(), token = ticket(acc,now);
   assert.ok(validTicket(token,acc,now));
+  const payload = token.slice(0,token.lastIndexOf('.'));
+  const legacySignature = createHmac('sha256',Buffer.from(acc.key,'hex')).update(acc.hash + '.' + payload).digest('base64url');
+  assert.notEqual(token,payload + '.' + legacySignature);
+  assert.equal(validTicket(payload + '.' + legacySignature,acc,now),false);
   assert.equal(validTicket(token,acc,now+3600000),false);
   assert.equal(validTicket(token.slice(1),acc,now),false);
   assert.equal(validTicket(token,{...acc,key:'a'.repeat(64)},now),false);

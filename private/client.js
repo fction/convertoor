@@ -1,24 +1,30 @@
-import {formats, signature, readReport, identify, choices, encodeFile} from '/api/gateway?view=media';
+import {formats, signature, readReport, identify, choices, encodeArgs, encodeFile, videoGeometry} from '/api/gateway?view=media';
+import {cleanAbandonedExports, downloadVideo, encodeVideoToDisk} from '/api/gateway?view=disk-output';
 import {openMedia, releaseRuntime} from '/api/gateway?view=runtime';
 const el = id => document.getElementById(id);
 const api = '/api/gateway?view=';
 const labels = {image:'Image', audio:'Audio', video:'Video'};
 const actions = {convert:'Convert', compress:'Compress', extract:'Extract audio'};
 const size = n => n < 1024 ? n + ' B' : Intl.NumberFormat('en', {maximumFractionDigits:1}).format(n / (n < 1048576 ? 1024 : 1048576)) + (n < 1048576 ? ' KiB' : ' MiB');
-let job, resultURL, expiry;
+let job, resultURL, disposeResult, expiry, leaving = false;
 const note = message => { el('status').textContent = message; };
+cleanAbandonedExports().catch(() => {});
 function discardOutput() {
   if (resultURL) URL.revokeObjectURL(resultURL);
+  const cleanup = disposeResult?.().catch(() => {});
   resultURL = undefined;
+  disposeResult = undefined;
   el('download').removeAttribute('href');
   el('download').removeAttribute('download');
+  el('download').onclick = null;
   el('result-info').textContent = '';
   el('result').hidden = true;
+  return cleanup;
 }
 function reset(message = '') {
   if (job) { clearTimeout(job.timer); job.controller.abort(); }
   job = null;
-  discardOutput();
+  const cleanup = discardOutput();
   el('file').value = '';
   el('filename').textContent = '';
   el('metadata').textContent = '';
@@ -34,12 +40,24 @@ function reset(message = '') {
   el('quality').disabled = false;
   el('hint').textContent = '';
   note(message);
+  return cleanup;
 }
 function profiles() {
   discardOutput();
   const lossless = ['png','wav','flac'].includes(el('format').value);
   el('quality').disabled = lossless;
   el('hint').textContent = lossless ? 'This format uses a fixed export preset.' : '';
+  el('run').disabled = false;
+  const target = el('format').value;
+  if (job?.info?.video && (target === 'mp4' || target === 'webm')) {
+    const frame = videoGeometry(job.info.video,el('mode').value,target,el('quality').value);
+    if (!frame.supported) {
+      el('run').disabled = true;
+      el('hint').textContent = frame.error;
+    } else if (Math.max(frame.width,frame.height) > frame.side) {
+      el('hint').textContent = `This preset uses a ${frame.width} × ${frame.height} frame to preserve the original display proportions.`;
+    }
+  }
   if (job?.info?.stillOnly) el('hint').textContent += ' For animations and multipage images, only the first frame or page is exported.';
 }
 function options() {
@@ -72,6 +90,7 @@ function ready(task) {
   el('settings').disabled = false;
 }
 async function selectFile(file) {
+  if (leaving) return;
   reset();
   if (!file) return;
   if (!file.size) return note('This file is empty. Choose another file.');
@@ -108,7 +127,8 @@ async function convert() {
   if (!task?.info || el('settings').disabled) return;
   discardOutput();
   const mode = el('mode').value, target = el('format').value;
-  busy(task, 'Processing the file on your device…', 5 * 60 * 1000);
+  const videoOutput = target === 'mp4' || target === 'webm';
+  busy(task, videoOutput ? 'Encoding video to local disk…' : 'Processing the file on your device…', 5 * 60 * 1000);
   let lastTime = -1, lastProgress = -1;
   const onProgress = ({progress, time}) => {
     if (job !== task) return;
@@ -121,11 +141,31 @@ async function convert() {
   };
   task.engine.on('progress',onProgress);
   try {
-    const blob = await encodeFile(task.engine,task.info,mode,target,el('quality').value,task.controller.signal);
-    if (job !== task) return;
-    resultURL = URL.createObjectURL(blob);
-    el('download').href = resultURL;
-    el('download').download = (task.file.name.replace(/\.[^.]+$/,'') || 'result') + '-export.' + target;
+    const quality = el('quality').value, signal = task.controller.signal;
+    let blob;
+    if (videoOutput) {
+      const args = encodeArgs(task.info,mode,target,quality);
+      const output = await encodeVideoToDisk(task.engine,args,target,signal);
+      if (job !== task) { await output.dispose(); return; }
+      blob = output.blob;
+      disposeResult = output.dispose;
+    } else {
+      blob = await encodeFile(task.engine,task.info,mode,target,quality,signal);
+      if (job !== task) return;
+    }
+    const download = el('download');
+    const filename = (task.file.name.replace(/\.[^.]+$/,'') || 'result') + '-export.' + target;
+    download.download = filename;
+    if (videoOutput) {
+      download.href = '#result';
+      download.onclick = event => {
+        event.preventDefault();
+        downloadVideo(blob, filename).catch(error => { if (job === task) note(error.message); });
+      };
+    } else {
+      resultURL = URL.createObjectURL(blob);
+      download.href = resultURL;
+    }
     const delta = Math.round((1 - blob.size / task.file.size)*100);
     el('result-info').textContent = size(task.file.size) + ' → ' + size(blob.size) + ' · ' + (delta > 0 ? delta + '% smaller' : delta < 0 ? -delta + '% larger' : 'about the same size');
     el('result').hidden = false; note('');
@@ -136,7 +176,22 @@ async function convert() {
     if (job === task) ready(task);
   }
 }
-function leave() { reset(); releaseRuntime(); clearTimeout(expiry); location.replace('/'); }
+async function leave() {
+  if (leaving) return;
+  leaving = true;
+  const processing = job?.processing;
+  const cleanup = reset();
+  clearTimeout(expiry);
+  releaseRuntime();
+  if (processing || cleanup) {
+    // An already-started download can hold the file after the session is closed.
+    let timer;
+    try {
+      await Promise.race([Promise.allSettled([processing,cleanup]), new Promise(resolve => { timer = setTimeout(resolve,500); })]);
+    } finally { clearTimeout(timer); }
+  }
+  location.replace('/');
+}
 async function checkSession() {
   const started = performance.now();
   try {
@@ -170,8 +225,8 @@ el('clear').onclick = () => reset();
 el('cancel').onclick = () => reset('Processing canceled.');
 el('mode').onchange = options;
 el('format').onchange = profiles;
-el('quality').onchange = discardOutput;
-el('run').onclick = convert;
+el('quality').onchange = profiles;
+el('run').onclick = () => { if (job) job.processing = convert(); };
 window.addEventListener('pageshow',checkSession);
 window.addEventListener('pagehide',() => { reset(); releaseRuntime(); clearTimeout(expiry); });
 // A file dropped outside the picker must not navigate away from a running job.

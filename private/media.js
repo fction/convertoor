@@ -1,6 +1,8 @@
 const sourceDir = '/source';
 const sourceName = 'input';
 const inputPath = sourceDir + '/' + sourceName;
+const maxSide = 8192;
+const maxPixels = 40000000;
 
 export async function mountInput(engine, file) {
   await engine.createDir(sourceDir);
@@ -11,7 +13,7 @@ export async function mountInput(engine, file) {
 
 function checkDimensions(width, height) {
   if (!(width > 0 && height > 0)) throw new Error('Could not read the frame dimensions. The codec may be unsupported.');
-  if (width * height > 40000000 || Math.max(width, height) > 8192) {
+  if (width * height > maxPixels || Math.max(width, height) > maxSide) {
     throw new Error('Frames must be at most 40 megapixels and no more than 8,192 pixels on either side.');
   }
 }
@@ -61,7 +63,7 @@ export function signature(bytes) {
 }
 export const inputArgs = ['-protocol_whitelist', 'file', '-format_whitelist', 'png_pipe,apng,jpeg_pipe,gif,webp_pipe,bmp_pipe,tiff_pipe,mp3,aac,wav,flac,ogg,matroska,webm,mov,avi'];
 export async function readReport(engine) {
-  const entries = 'format=duration,bit_rate:stream=index,codec_type,width,height,duration,channels,sample_rate,bit_rate:stream_disposition=attached_pic';
+  const entries = 'format=duration,bit_rate:stream=index,codec_type,width,height,display_aspect_ratio,duration,channels,sample_rate,bit_rate:stream_disposition=attached_pic:stream_side_data=rotation';
   const code = await engine.ffprobe(['-v','error',...inputArgs,'-show_entries',entries,'-of','json','-o','probe.json',inputPath], 25000);
   // This core can leave its return slot at -1 after writing a complete ffprobe report.
   try {
@@ -111,9 +113,63 @@ function lossyAudioArgs(info, mode, target, index, channels) {
   const hz = [48000,44100,32000,24000,22050,16000,12000,11025,8000].find(rate => rate <= ceiling) || 8000;
   return ['-ac',channels,'-ar',String(hz),'-b:a',String(bitrate)];
 }
+
+function reducedRatio(width, height) {
+  let a = width, b = height;
+  while (b) [a,b] = [b,a % b];
+  return [width / a,height / a];
+}
+
+const qualities = ['small','balanced','high'];
+export function videoGeometry(video, mode, target, quality) {
+  const side = mode === 'compress' ? [720,1280,1920][qualities.indexOf(quality)] : maxSide;
+  const other = target === 'webm' ? 'MP4' : 'WebM';
+  const unsupported = {side,supported:false,error:`This display ratio cannot be stored exactly in ${formats[target][0]} within the frame limits. Try ${other}.`};
+  let {width,height} = video;
+  const ratio = /^(\d+):(\d+)$/.exec(video.display_aspect_ratio);
+  let [across,down] = ratio && ratio.slice(1).every(term => Number(term) > 0 && Number(term) <= 0x7fffffff)
+    ? reducedRatio(Number(ratio[1]),Number(ratio[2])) : reducedRatio(width,height);
+  const rotation = video.side_data_list?.find(entry => Number.isFinite(entry.rotation))?.rotation || 0;
+  if (Math.abs(Math.abs(rotation) % 180 - 90) < 1) {
+    [width,height] = [height,width];
+    [across,down] = [down,across];
+  }
+  const shrink = Math.min(1,side / Math.max(width,height));
+  const aspect = across / down;
+  let outWidth, outHeight;
+  if (target === 'webm') {
+    // This WebM muxer stores integer display width and coded height. An exact
+    // ratio needs a height that is a multiple of the reduced denominator.
+    if (down > maxSide) return unsupported;
+    outHeight = down * Math.max(1, Math.floor(height * shrink / down));
+    outWidth = Math.max(Math.ceil(aspect),Math.round(width * Math.min(shrink, outHeight / height)));
+    outWidth = Math.min(outWidth,Math.floor(maxPixels / outHeight));
+  } else {
+    // H.264 4:2:0 needs even coded dimensions. FFmpeg discards a pixel ratio
+    // that would render either side narrower than one pixel (e.g. 1:4000).
+    outWidth = 2 * Math.max(1,Math.floor(width * shrink / 2),Math.ceil(aspect / 2));
+    outHeight = 2 * Math.max(1,Math.floor(height * shrink / 2),Math.ceil(down / across / 2));
+  }
+  const candidates = [[outWidth,outHeight]];
+  if (target === 'mp4') {
+    // An anamorphic source can have an exact 16-bit SAR at its native size
+    // even if the rounded preset size would require a larger H.264 fraction.
+    candidates.push([2*Math.ceil(width/2),2*Math.ceil(height/2)], [2*width,2*height]);
+  }
+  const sarLimit = target === 'mp4' ? 65535 : 0x7fffffff;
+  for (const [w,h] of candidates) {
+    if (!(w > 0 && h > 0 && w <= maxSide && h <= maxSide && w*h <= maxPixels)) continue;
+    if (w*down < across || h*across < down) continue;
+    const [sw,sh] = reducedRatio(across*h,down*w);
+    if (sw > sarLimit || sh > sarLimit) continue;
+    return {width:w,height:h,side,supported:true,filter:`scale=${w}:${h},setsar=${sw}/${sh}:max=${sarLimit}`};
+  }
+  return unsupported;
+}
+
 export function encodeArgs(info, mode, target, quality) {
-  if (!choices(info, mode).includes(target) || !['small','balanced','high'].includes(quality)) throw new Error('Choose a supported format and quality preset.');
-  const index = ['small','balanced','high'].indexOf(quality);
+  const index = qualities.indexOf(quality);
+  if (!choices(info, mode).includes(target) || index === -1) throw new Error('Choose a supported format and quality preset.');
   const channels = String(Math.min(info.audio?.channels || 2, 2));
   const args = ['-hide_banner','-loglevel','error',...inputArgs,'-threads','1','-i',inputPath,'-map_metadata','-1','-map_chapters','-1','-sn','-dn'];
   if (info.kind === 'image') {
@@ -127,11 +183,9 @@ export function encodeArgs(info, mode, target, quality) {
   } else {
     args.push('-map','0:' + info.video.index);
     if (info.audio) args.push('-map','0:' + info.audio.index);
-    const side = mode === 'compress' ? [720,1280,1920][index] : 8192;
-    // Clamp inside scale. Padding after a dimension rounds to zero loses the source pixels.
-    const factor = `min(1,${side}/max(iw,ih))`;
-    const scale = `scale=w='max(2,trunc(iw*${factor}/2)*2)':h='max(2,trunc(ih*${factor}/2)*2)'`;
-    args.push('-vf',scale,'-pix_fmt','yuv420p');
+    const geometry = videoGeometry(info.video,mode,target,quality);
+    if (!geometry.supported) throw new Error(geometry.error);
+    args.push('-vf',geometry.filter,'-pix_fmt','yuv420p');
     if (target === 'mp4') args.push('-c:v','libx264','-preset',mode === 'compress' ? 'veryfast' : 'ultrafast','-crf',(mode === 'compress' ? ['34','28','23'] : ['32','26','20'])[index],'-c:a','aac','-movflags','+faststart');
     else args.push('-c:v','libvpx','-deadline','realtime','-cpu-used','6','-crf',['38','28','12'][index],'-b:v',['500k','1200k','2500k'][index],'-c:a','libvorbis');
     if (info.audio) {

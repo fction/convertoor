@@ -59,7 +59,7 @@ export async function openMedia(file, header, signal) {
   const terminate = () => engine.terminate();
   signal.addEventListener('abort', terminate, {once:true});
   try {
-    await engine.load({coreURL, wasmURL:wasm});
+    await engine.load({coreURL:new URL('/api/gateway?view=engine-worker', location.href).href, wasmURL:wasm});
     await mountInput(engine, input);
     return engine;
   } catch (error) {
