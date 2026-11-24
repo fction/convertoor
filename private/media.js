@@ -31,6 +31,14 @@ export function signature(bytes) {
   throw new Error('Тип файла не поддерживается. Список доступных форматов приведён ниже.');
 }
 export const inputArgs = ['-protocol_whitelist', 'file', '-format_whitelist', 'png_pipe,apng,jpeg_pipe,gif,webp_pipe,bmp_pipe,tiff_pipe,mp3,aac,wav,flac,ogg,matroska,webm,mov,avi'];
+export async function readReport(engine) {
+  const code = await engine.ffprobe(['-v','error',...inputArgs,'-show_streams','-show_format','-of','json','-o','probe.json','input'], 25000);
+  // This core can leave its return slot at -1 after writing a complete ffprobe report.
+  try {
+    if (code !== 0 && code !== -1) throw new Error();
+    return JSON.parse(await engine.readFile('probe.json','utf8'));
+  } catch { throw new Error('Не удалось прочитать контейнер. Проверьте, что файл открывается и его кодек поддерживается.'); }
+}
 export function identify(header, probe) {
   const streams = probe.streams || [];
   const video = streams.find(s => s.codec_type === 'video' && !s.disposition?.attached_pic);
@@ -51,6 +59,7 @@ export function choices(info, mode) {
 export function encodeArgs(info, mode, target, quality) {
   if (!choices(info, mode).includes(target) || !['small','balanced','high'].includes(quality)) throw new Error('Выберите доступный формат и качество.');
   const index = ['small','balanced','high'].indexOf(quality);
+  const channels = String(Math.min(info.audio?.channels || 2, 2));
   const args = [...inputArgs, '-threads','1','-i','input','-map_metadata','-1','-map_chapters','-1','-sn','-dn'];
   if (info.kind === 'image') {
     args.push('-map','0:' + info.video.index,'-frames:v','1');
@@ -59,15 +68,20 @@ export function encodeArgs(info, mode, target, quality) {
     if (target === 'png') args.push('-c:v','png','-compression_level','6');
   } else if (info.kind === 'audio' || mode === 'extract') {
     args.push('-map','0:' + info.audio.index,'-vn','-c:a', { mp3:'libmp3lame', wav:'pcm_s16le', flac:'flac', ogg:'libvorbis' }[target]);
-    if (target === 'ogg' || target === 'mp3') args.push('-ac','2','-ar','48000','-b:a',(target === 'ogg' ? ['48k','96k','160k'] : ['80k','160k','256k'])[index]);
+    if (target === 'ogg' || target === 'mp3') args.push('-ac',channels,'-ar','48000','-b:a',(target === 'ogg' ? ['48k','96k','160k'] : ['80k','160k','256k'])[index]);
   } else {
     args.push('-map','0:' + info.video.index);
     if (info.audio) args.push('-map','0:' + info.audio.index);
     const side = mode === 'compress' ? [720,1280,1920][index] : 8192;
     args.push('-vf','scale=w=min('+side+'\\,iw):h=min('+side+'\\,ih):force_original_aspect_ratio=decrease:force_divisible_by=2,pad=max(2\\,iw):max(2\\,ih)','-pix_fmt','yuv420p');
-    if (target === 'mp4') args.push('-c:v','libx264','-preset','ultrafast','-crf',['32','26','20'][index],'-c:a','aac','-movflags','+faststart');
+    if (target === 'mp4') args.push('-c:v','libx264','-preset',mode === 'compress' ? 'veryfast' : 'ultrafast','-crf',(mode === 'compress' ? ['34','28','23'] : ['32','26','20'])[index],'-c:a','aac','-movflags','+faststart');
     else args.push('-c:v','libvpx','-deadline','realtime','-cpu-used','6','-crf',['38','28','12'][index],'-b:v',['500k','1200k','2500k'][index],'-c:a','libvorbis');
-    if (info.audio) args.push('-ac','2','-ar','48000','-b:a',['64k','96k','160k'][index]);
+    if (info.audio) {
+      const profileRate = [64000,96000,160000][index];
+      const sourceRate = Number(info.audio.bit_rate) || profileRate;
+      const rate = mode === 'compress' ? Math.max(48000,Math.min(sourceRate,profileRate)) : profileRate;
+      args.push('-ac',channels,'-ar','48000','-b:a',String(rate));
+    }
   }
   return [...args,'-threads','1','output.' + target];
 }

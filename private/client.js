@@ -1,5 +1,5 @@
 import {FFmpeg} from '/vendor/index.js';
-import {limit, formats, signature, inputArgs, identify, choices, encodeArgs} from '/api/gateway?view=media';
+import {limit, formats, signature, readReport, identify, choices, encodeArgs} from '/api/gateway?view=media';
 const el = id => document.getElementById(id);
 const api = '/api/gateway?view=';
 const labels = {image:'Изображение', audio:'Аудио', video:'Видео'};
@@ -76,14 +76,7 @@ async function selectFile(file) {
     await engine.load({coreURL:location.origin + '/vendor/ffmpeg-core.js', wasmURL:location.origin + '/vendor/ffmpeg-core.wasm'});
     if (job !== task) return;
     await engine.writeFile('input',new Uint8Array(await file.arrayBuffer()));
-    const code = await engine.ffprobe(['-v','error',...inputArgs,'-show_streams','-show_format','-of','json','-o','probe.json','input'], 25000);
-    // Core 0.12.10 can leave its return slot at -1 after writing a complete ffprobe report.
-    let report;
-    try {
-      if (code !== 0 && code !== -1) throw new Error();
-      report = JSON.parse(await engine.readFile('probe.json','utf8'));
-    } catch { throw new Error('Не удалось прочитать контейнер. Проверьте, что файл открывается и его кодек поддерживается.'); }
-    const info = task.info = identify(header, report);
+    const info = task.info = identify(header, await readReport(engine));
     if (job !== task) return;
     const detail = [labels[info.kind],info.label,size(file.size)];
     if (info.video) detail.push(info.video.width + ' × ' + info.video.height);
